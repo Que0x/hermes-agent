@@ -1621,13 +1621,30 @@ class SessionDB:
         sanitized = re.sub(r"(?i)^(AND|OR|NOT)\b\s*", "", sanitized.strip())
         sanitized = re.sub(r"(?i)\s+(AND|OR|NOT)\s*$", "", sanitized.strip())
 
-        # Step 5: Wrap unquoted dotted and/or hyphenated terms in double
-        # quotes.  FTS5's tokenizer splits on dots and hyphens, turning
-        # ``chat-send`` into ``chat AND send`` and ``P2.2`` into ``p2 AND 2``.
-        # Quoting preserves phrase semantics.  A single pass avoids the
-        # double-quoting bug that would occur if dotted, hyphenated and underscored
-        # patterns were applied sequentially (e.g. ``my-app.config``).
-        sanitized = re.sub(r"\b(\w+(?:[._-]\w+)+)\b", r'"\1"', sanitized)
+        # Step 5: Wrap unquoted literal-like tokens that contain punctuation
+        # FTS5 would otherwise tokenize or interpret as syntax.
+        #
+        # Examples:
+        # - ``chat-send`` would become ``chat AND send``
+        # - ``P2.2`` would become ``p2 AND 2``
+        # - ``path:config.yaml`` / ``C:\Users\demo`` would be parsed as
+        #   column filters (``no such column``) instead of literal terms
+        #
+        # A token-based pass avoids the double-quoting bug that would occur
+        # if dotted, hyphenated, underscored, or path-like patterns were
+        # applied sequentially (e.g. ``my-app.config``).
+        def _quote_literal_token(token: str) -> str:
+            if not token:
+                return token
+            if token.upper() in ("AND", "OR", "NOT"):
+                return token
+            if token.startswith("\x00Q") and token.endswith("\x00"):
+                return token
+            if any(ch in token for ch in (".", "_", "-", ":", "/", "\\")) and re.search(r"\w", token):
+                return f'"{token}"'
+            return token
+
+        sanitized = " ".join(_quote_literal_token(token) for token in sanitized.split())
 
         # Step 6: Restore preserved quoted phrases
         for i, quoted in enumerate(_quoted_parts):

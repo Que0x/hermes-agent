@@ -665,6 +665,29 @@ class TestFTS5Search:
         assert isinstance(results2, list)
         assert len(results2) >= 1
 
+    def test_search_colon_and_windows_path_terms_as_literals(self, db):
+        """Colon-delimited and Windows-style path queries must search literal content.
+
+        FTS5 treats ``:`` as a column filter operator, so raw queries like
+        ``path:config.yaml`` or ``C:\\Users\\demo`` raise ``no such column``.
+        search_messages() catches the exception and silently returns [], which
+        makes valid session search queries look like misses.
+        """
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1",
+            role="user",
+            content="Inspect path:config.yaml under C:\\Users\\demo\\project",
+        )
+
+        colon_results = db.search_messages("path:config.yaml")
+        assert len(colon_results) == 1
+        assert colon_results[0]["session_id"] == "s1"
+
+        windows_results = db.search_messages(r"C:\Users\demo\project")
+        assert len(windows_results) == 1
+        assert windows_results[0]["session_id"] == "s1"
+
     def test_search_quoted_phrase_preserved(self, db):
         """User-provided quoted phrases should be preserved for exact matching."""
         db.create_session(session_id="s1", source="cli")
@@ -752,6 +775,15 @@ class TestFTS5Search:
         # Mixed dots and hyphens — single pass avoids double-quoting
         assert s('my-app.config') == '"my-app.config"'
         assert s('my-app.config.ts') == '"my-app.config.ts"'
+
+    def test_sanitize_fts5_quotes_colon_and_windows_path_terms(self):
+        """Colon-delimited and Windows-style path terms should be treated literally."""
+        from hermes_state import SessionDB
+        s = SessionDB._sanitize_fts5_query
+
+        assert s('path:config.yaml') == '"path:config.yaml"'
+        assert s('foo:bar') == '"foo:bar"'
+        assert s(r'C:\Users\demo') == r'"C:\Users\demo"'
 
     def test_sanitize_fts5_quotes_underscored_terms(self):
         """Underscored terms should be wrapped in quotes for exact matching.
