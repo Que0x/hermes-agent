@@ -41,6 +41,10 @@ _PATH_ARG_KEYS = {"path", "file_path", "workdir"}
 # Tools that take shell commands where we should extract paths
 _COMMAND_TOOLS = {"terminal"}
 
+# Shell builtins whose operand is a directory we should inspect even when it's
+# a bare relative name (e.g. ``cd backend``) with no separator or extension.
+_DIR_OPERAND_COMMANDS = {"cd", "pushd"}
+
 # How many parent directories to walk up when looking for hints.
 # Prevents scanning all the way to / for deeply nested paths.
 _MAX_ANCESTOR_WALK = 5
@@ -53,6 +57,41 @@ def _is_ancestor_or_same(a: Path, b: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _strip_quotes(token: str) -> str:
+    """Remove a single pair of matching surrounding quotes from *token*."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in "\"'":
+        return token[1:-1]
+    return token
+
+
+def _tokenize_command(cmd: str) -> list:
+    """Split a shell command into tokens, preserving Windows path separators.
+
+    shlex's default POSIX mode treats ``\\`` as an escape character and
+    silently drops it, turning ``C:\\work\\backend`` into ``C:workbackend``.
+    On Windows we tokenize in non-POSIX mode (which keeps backslashes) and
+    strip surrounding quotes ourselves.
+    """
+    posix = os.name != "nt"
+    try:
+        tokens = shlex.split(cmd, posix=posix)
+    except ValueError:
+        tokens = cmd.split()
+    if not posix:
+        tokens = [_strip_quotes(t) for t in tokens]
+    return tokens
+
+
+def _looks_like_path(token: str) -> bool:
+    """Heuristic: does *token* look like a filesystem path worth resolving?"""
+    if "/" in token or "\\" in token or "." in token:
+        return True
+    # Windows drive reference, e.g. ``C:`` or ``C:work``.
+    if len(token) >= 2 and token[0].isalpha() and token[1] == ":":
+        return True
+    return False
 
 class SubdirectoryHintTracker:
     """Track which directories the agent visits and load hints on first access.
@@ -149,22 +188,23 @@ class SubdirectoryHintTracker:
 
     def _extract_paths_from_command(self, cmd: str, candidates: Set[Path]):
         """Extract path-like tokens from a shell command string."""
-        try:
-            tokens = shlex.split(cmd)
-        except ValueError:
-            tokens = cmd.split()
+        tokens = _tokenize_command(cmd)
 
+        expect_dir_operand = False
         for token in tokens:
+            is_dir_operand = expect_dir_operand
+            expect_dir_operand = token in _DIR_OPERAND_COMMANDS
+
             # Skip flags
             if token.startswith("-"):
                 continue
-            # Must look like a path (contains / or .)
-            if "/" not in token and "." not in token:
-                continue
-            # Skip URLs
+            # Skip URLs and scp/git remotes
             if token.startswith(("http://", "https://", "git@")):
                 continue
-            self._add_path_candidate(token, candidates)
+            # The operand right after cd/pushd is a directory even when it's a
+            # bare relative name (``cd backend``) with no separator or extension.
+            if is_dir_operand or _looks_like_path(token):
+                self._add_path_candidate(token, candidates)
 
     def _is_valid_subdir(self, path: Path) -> bool:
         """Check if path is a valid directory to scan for hints.

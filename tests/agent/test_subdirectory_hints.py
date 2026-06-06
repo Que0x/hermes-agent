@@ -112,6 +112,24 @@ class TestSubdirectoryHintTracker:
         assert result is not None
         assert "Backend-specific instructions" in result
 
+    def test_terminal_cd_bare_relative_dir(self, project):
+        """`cd backend && ls` with a bare relative dir (no `/` or `.`) is detected."""
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call(
+            "terminal", {"command": "cd backend && ls"}
+        )
+        assert result is not None
+        assert "Backend-specific instructions" in result
+
+    def test_terminal_pushd_bare_relative_dir(self, project):
+        """`pushd` operands are treated like `cd` for hint discovery."""
+        tracker = SubdirectoryHintTracker(working_dir=str(project))
+        result = tracker.check_tool_call(
+            "terminal", {"command": "pushd backend"}
+        )
+        assert result is not None
+        assert "Backend-specific instructions" in result
+
     def test_relative_path(self, project):
         """Relative paths resolved against working_dir."""
         tracker = SubdirectoryHintTracker(working_dir=str(project))
@@ -325,3 +343,59 @@ class TestOutsideWorkspaceRejection:
         outside.mkdir(exist_ok=True)
         tracker = SubdirectoryHintTracker(working_dir=str(project))
         assert tracker._is_valid_subdir(outside) is False
+
+
+class TestCommandPathHeuristics:
+    """Cross-platform tests for shell-command path detection (ref candidate fix)."""
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "backend/src",       # POSIX separator
+            r"C:\work\backend",  # Windows separator + drive letter
+            "main.py",           # extension dot
+            "./rel",             # leading dot
+            "C:",                # bare drive reference
+            "D:data",            # drive-relative reference
+        ],
+    )
+    def test_looks_like_path_accepts(self, token):
+        from agent.subdirectory_hints import _looks_like_path
+
+        assert _looks_like_path(token) is True
+
+    @pytest.mark.parametrize(
+        "token", ["ls", "backend", "make", "build", "&&", "2>&1"]
+    )
+    def test_looks_like_path_rejects_bare_words(self, token):
+        from agent.subdirectory_hints import _looks_like_path
+
+        assert _looks_like_path(token) is False
+
+    def test_tokenize_preserves_windows_backslashes(self, monkeypatch):
+        """On Windows, tokenization must not eat backslash path separators.
+
+        POSIX-mode shlex treats ``\\`` as an escape char and mangles
+        ``C:\\work\\backend`` into ``C:workbackend``.
+        """
+        import agent.subdirectory_hints as sh
+
+        monkeypatch.setattr(sh.os, "name", "nt")
+        tokens = sh._tokenize_command(r"cd C:\work\backend && dir")
+        assert r"C:\work\backend" in tokens
+
+    def test_tokenize_strips_quotes_on_windows(self, monkeypatch):
+        """Quoted Windows paths keep their separators and lose their quotes."""
+        import agent.subdirectory_hints as sh
+
+        monkeypatch.setattr(sh.os, "name", "nt")
+        tokens = sh._tokenize_command(r'cd "C:\Program Files\app"')
+        assert r"C:\Program Files\app" in tokens
+
+    def test_tokenize_posix_unaffected(self, monkeypatch):
+        """POSIX tokenization keeps its escape-aware behavior."""
+        import agent.subdirectory_hints as sh
+
+        monkeypatch.setattr(sh.os, "name", "posix")
+        tokens = sh._tokenize_command("cd /tmp/backend && ls")
+        assert tokens == ["cd", "/tmp/backend", "&&", "ls"]
